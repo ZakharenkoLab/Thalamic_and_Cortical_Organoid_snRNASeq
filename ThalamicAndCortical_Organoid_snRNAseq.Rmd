@@ -10,13 +10,6 @@ output: html_document
 
 
 ```{r}
-#Use this path when on mac with mounted volumes
-# main_path = '/Volumes/developmentalneurobiology'
-#Use this path when on dnb1.stjude.org connected through NoMachine
-main_path = '/media'
-#Use this path when on the HPC connected through VPN
-# main_path = '/research/dept/dnb'
-
 CodyFunctions = paste(main_path, "/core/core_operations/Bioinformatics/cramirez/Programs/Single_Cell_Analysis_Functions.R", sep = "")
 source(CodyFunctions)
 
