@@ -1,0 +1,207 @@
+---
+title: "ThalamicAndCortical_Organoid_snRNAseq"
+author: "Cody Ramirez"
+date: "4/24/2023"
+output: html_document
+---
+
+
+
+
+
+```{r}
+#Use this path when on mac with mounted volumes
+# main_path = '/Volumes/developmentalneurobiology'
+#Use this path when on dnb1.stjude.org connected through NoMachine
+main_path = '/media'
+#Use this path when on the HPC connected through VPN
+# main_path = '/research/dept/dnb'
+
+CodyFunctions = paste(main_path, "/core/core_operations/Bioinformatics/cramirez/Programs/Single_Cell_Analysis_Functions.R", sep = "")
+source(CodyFunctions)
+
+full_path <- paste(main_path, "/core/core_operations/Bioinformatics/cramirez/zakhagrp/ThalamicAndCortical_Organoid_snRNAseq", sep = "")
+setwd(full_path)
+
+results_path <- paste(full_path, "/3_analyzed_results/4_ForcedCellRanger_SoupX", sep = "")
+
+set.seed(1234)
+#sets the future settings for multicore processing
+plan(strategy = "multisession", workers = 10)#Changing the current plan to access parallelization
+options(parallelly.fork.enable = TRUE, future.globals.maxSize = +Inf, future.seed = TRUE) #enables forking in Rstudio (potentially unstable)
+plan()
+
+# Reading in metadata file
+project.metadata <- read.csv(paste(full_path, "/snRNA-seq_metadata.tsv", sep = ""), sep = '\t', header = TRUE)
+```
+
+
+
+
+
+Ambient RNA Clean up - SoupX
+```{r}
+for (i in 1:length(project.metadata$ID))
+{
+  OutsFolder = paste(full_path, "/2_cellranger_count/ForcedCellsParameters/", project.metadata$ID[i], "/outs", sep = "")
+  pdf(file = paste(OutsFolder, "/SoupX_output.pdf", sep = ""))
+  # Load data and estimate soup profile
+  SoupChannel = load10X(OutsFolder)
+  # Estimate rho
+  SoupChannel = autoEstCont(SoupChannel)
+  # Clean the data
+  out = adjustCounts(SoupChannel, roundToInt = TRUE)
+  # Of course, the next thing you'll want to do is to load this corrected expression matrix into some downstream analysis tool and further analyse the data.
+  # The corrected matrix can then be used for any downstream analysis in place of the uncorrected raw matrix. If you are using 10X data and would like to save these final counts out in the same format, you can use the DropletUtils write10xCounts function like this,
+  DropletUtils:::write10xCounts(paste(OutsFolder, "/strainedCounts", sep = ""), out, overwrite = TRUE)
+  dev.off()
+}
+```
+
+
+
+
+
+```{r}
+############################################################################################################
+# Reading in the data, appending sample metadata and conducting basic filtering
+############################################################################################################
+# Creating a list to contain all Seurat data
+Filtered.Master.Seurat.obj <- list()
+
+for (i in 1:length(project.metadata$ID)){
+
+  cat("Beginning to process sample:", project.metadata$ID[i], "\n")
+  cat("Reading in data\n")
+  Seurat.data <- Read10X(data.dir = paste(full_path, "/2_cellranger_count/ForcedCellsParameters/", project.metadata$ID[i], "/outs/strainedCounts", sep = ""))
+  
+  cat("Creating SeuratObject\n")
+  Filtered.Master.Seurat.obj[[i]] <- CreateSeuratObject(counts = Seurat.data, min.cells = 3, min.features = 200)
+  
+  cat("Calculating mitochondrial percentage per cell\n")
+  Filtered.Master.Seurat.obj[[i]] <- PercentageFeatureSet(Filtered.Master.Seurat.obj[[i]], pattern = "^MT-", col.name = "percent.mito")
+  
+  Filtered.Master.Seurat.obj[[i]]$log10GenesPerUMI <- log10(Filtered.Master.Seurat.obj[[i]]$nFeature_RNA)/log10(Filtered.Master.Seurat.obj[[i]]$nCount_RNA)
+  
+  cat("Adding metadata to SeuratObject\n")
+  sample.metadata <- rbind(project.metadata[i, ], project.metadata[i, ][rep(1, length(Filtered.Master.Seurat.obj[[i]]$nCount_RNA)-1), ])
+  Filtered.Master.Seurat.obj[[i]]@meta.data <- cbind(Filtered.Master.Seurat.obj[[i]]@meta.data, sample.metadata)
+  
+  cat("Generating QC plots for RAW data\n")
+  Generate.QC.Plots(Filtered.Master.Seurat.obj[[i]], results_path, "0", project.metadata$ID[i], "QC_Raw_Data")
+  
+  cat("1st Data filter\n")
+  Filtered.Master.Seurat.obj[[i]] <- subset(Filtered.Master.Seurat.obj[[i]], subset = 
+                                              nFeature_RNA >= 300 & 
+                                              nCount_RNA >= 500 & 
+                                              percent.mito <= 1 & percent.mito <= FindOutlierThershold(Filtered.Master.Seurat.obj[[i]]$percent.mito)[2])
+  
+    cat("2nd Data filter +/-3MADs\n")
+   Filtered.Master.Seurat.obj[[i]] <- subset(Filtered.Master.Seurat.obj[[i]], subset = 
+                                              nFeature_RNA >= FindOutlierThershold(Filtered.Master.Seurat.obj[[i]]$nFeature_RNA)[1] &
+                                              nFeature_RNA <= FindOutlierThershold(Filtered.Master.Seurat.obj[[i]]$nFeature_RNA)[2] ) #&
+                                              # nCount_RNA >= FindOutlierThershold(Filtered.Master.Seurat.obj[[i]]$nCount_RNA)[1] &
+                                              # nCount_RNA <= FindOutlierThershold(Filtered.Master.Seurat.obj[[i]]$nCount_RNA)[2] )
+  
+  cat("Generating QC plots for FILTERED data\n")
+  Generate.QC.Plots(Filtered.Master.Seurat.obj[[i]], results_path, "2", project.metadata$ID[i], "QC_Filtered_Data")
+  
+  cat("Processing a single sample and generating clusters\n")
+  Filtered.Master.Seurat.obj[[i]] <- Single.Sample(Filtered.Master.Seurat.obj[[i]], results_path, "3", project.metadata$ID[i], "GRCh38", Regress.Cell.Cycle = "NO")
+  Filtered.Master.Seurat.obj[[i]] <- SetIdent(Filtered.Master.Seurat.obj[[i]], value=Filtered.Master.Seurat.obj[[i]]@meta.data$RNA_snn_res.0.4)
+  
+  cat("Generating Differential Expression Data\n")
+  Generate.Differential.Data(Filtered.Master.Seurat.obj[[i]], results_path, "3", project.metadata$ID[i], "Single.Sample")
+
+  # # Cell signatures produced for automated cluster labeling
+  # Filtered.Master.Seurat.obj[[i]] <- Calculate.Cell.Type.Signature(Filtered.Master.Seurat.obj[[i]], results_path, "3", project.metadata$ID[[i]], "Single.Sample", cell.type.df, "GRCh38")
+
+  saveRDS(Filtered.Master.Seurat.obj[[i]], file = paste(results_path, "/",  project.metadata$ID[[i]], "/", project.metadata$ID[[i]], "_3_Single.Sample/", project.metadata$ID[[i]], "_object.rds", sep = ""))
+  
+  cat("Processing complete for sample:", project.metadata$ID[i], "\n")
+  
+}
+rm(Seurat.data)
+saveRDS(Filtered.Master.Seurat.obj, file = paste(results_path, "/Filtered_Master_Seurat_obj.rds", sep = ""))
+```
+
+
+
+
+
+```{r}
+Filtered.Master.Seurat.obj <- readRDS(file = paste(results_path, "/Filtered_Master_Seurat_obj.rds", sep = ""))
+
+snCBO_samples <- c(Filtered.Master.Seurat.obj[[2]], Filtered.Master.Seurat.obj[[4]])
+
+cat("Processing a single sample and generating clusters\n")
+snCBO_Integrated <- Harmony.Integration(snCBO_samples, results_path, "3", "snCBO_Integrated", "GRCh38", Regress.Cell.Cycle = "NO")
+snCBO_Integrated <- SetIdent(snCBO_Integrated, value=snCBO_Integrated@meta.data$RNA_snn_res.0.4)
+
+cat("Generating QC plots for FILTERED data\n")
+Generate.QC.Plots(snCBO_Integrated, results_path, "2", "snCBO_Integrated", "QC_Filtered_Data")
+
+cat("Generating Differential Expression Data\n")
+Generate.Differential.Data(snCBO_Integrated, results_path, "3", "snCBO_Integrated", "Harmony.Integration")
+
+saveRDS(snCBO_Integrated, file = paste(results_path, "/snCBO_Integrated/snCBO_Integrated_3_Harmony.Integration/snCBO_Integrated_obj.rds", sep = ""))
+```
+
+
+
+
+
+```{r}
+snTha_samples <- c(Filtered.Master.Seurat.obj[[1]], Filtered.Master.Seurat.obj[[3]])
+
+cat("Processing a single sample and generating clusters\n")
+snTha_Integrated <- Harmony.Integration(snTha_samples, results_path, "3", "snTha_Integrated", "GRCh38", Regress.Cell.Cycle = "NO")
+snTha_Integrated <- SetIdent(snTha_Integrated, value=snTha_Integrated@meta.data$RNA_snn_res.0.4)
+
+cat("Generating QC plots for FILTERED data\n")
+Generate.QC.Plots(snTha_Integrated, results_path, "2", "snTha_Integrated", "QC_Filtered_Data")
+
+cat("Generating Differential Expression Data\n")
+Generate.Differential.Data(snTha_Integrated, results_path, "3", "snTha_Integrated", "Harmony.Integration")
+
+saveRDS(snTha_Integrated, file = paste(results_path, "/snTha_Integrated/snTha_Integrated_3_Harmony.Integration/snTha_Integrated_obj.rds", sep = ""))
+```
+
+
+
+
+
+```{r}
+seu1 = readRDS(paste(results_path , "/snCBO1/snCBO1_3_Single.Sample/snCBO1_object.rds", sep = ""))
+scConf1 = createConfig(seu1)
+makeShinyFiles(seu1, scConf1, shiny.prefix = "sc1", shiny.dir = "shinyAppMulti/")
+
+seu2 = readRDS(paste(results_path, "/snCBO2/snCBO2_3_Single.Sample/snCBO2_object.rds", sep = ""))
+scConf2 = createConfig(seu2)
+makeShinyFiles(seu2, scConf2, shiny.prefix = "sc2", shiny.dir = "shinyAppMulti/")
+
+seu3 = readRDS(paste(results_path, "/snCBO_Integrated/snCBO_Integrated_3_Harmony.Integration/snCBO_Integrated_obj.rds", sep = ""))
+scConf3 = createConfig(seu3)
+makeShinyFiles(seu3, scConf3, shiny.prefix = "sc3", shiny.dir = "shinyAppMulti/")
+
+
+
+seu4 = readRDS(paste(results_path, "/snTha1/snTha1_3_Single.Sample/snTha1_object.rds", sep = ""))
+scConf4 = createConfig(seu4)
+makeShinyFiles(seu4, scConf4, shiny.prefix = "sc4", shiny.dir = "shinyAppMulti/")
+
+seu5 = readRDS(paste(results_path, "/snTha2/snTha2_3_Single.Sample/snTha2_object.rds", sep = ""))
+scConf5 = createConfig(seu5)
+makeShinyFiles(seu5, scConf5, shiny.prefix = "sc5", shiny.dir = "shinyAppMulti/")
+
+seu6 = readRDS(paste(results_path, "/snTha_Integrated/snTha_Integrated_3_Harmony.Integration/snTha_Integrated_obj.rds", sep = ""))
+scConf6 = createConfig(seu6)
+makeShinyFiles(seu6, scConf6, shiny.prefix = "sc6", shiny.dir = "shinyAppMulti/")
+
+
+makeShinyCodesMulti(
+  shiny.title = "Zakharenko's Thalamic and Cortical Organoids Project", shiny.footnotes = "Dr. Kristen Thomas's project",
+  shiny.prefix = c("sc1", "sc2", "sc3", "sc4", "sc5", "sc6"),
+  shiny.headers = c("snCBO1", "snCBO2", "snCBO_Integrated", "snTha1", "snTha2", "snTha_Integrated"),
+  shiny.dir = "shinyAppMulti/") 
+```
