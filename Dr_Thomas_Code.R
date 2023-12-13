@@ -9,6 +9,15 @@ library(tidyr)
 library(ggplot2)
 library(viridis)
 library(RColorBrewer)
+library(NeuronChat)
+library(CellChat)
+library(ggalluvial)
+library(SeuratObject)
+library(ComplexHeatmap)
+library(circlize)
+
+#load customized graphing functions for NeuronChat analysis
+source('NeuronChat_graphing_functions.R')
 
 ########################################
 #hThO cluster IDs
@@ -274,3 +283,131 @@ FeaturePlot(main.trajectory, features = 'pseudotime') +
         axis.line= element_blank(),
         legend.text = element_text(size = 6))
 ggsave('snCBO_pseudotime.pdf', height = 10, width = 10, units = 'cm')
+
+########################################
+#NeuronChat Analysis
+#########################################
+
+#Get normalized count data and meta data for NeuronChat analysis
+#metadata
+meta <- snCBO@meta.data
+meta$active.ident <- snCBO@active.ident
+meta <- meta[ ,c(9,26,43)]
+meta <- meta %>%
+  mutate(group = ifelse(grepl('Un.ExN', meta$active.ident), 'Ctx Un.ExN',
+                        ifelse(grepl('ExN', meta$active.ident), 'Ctx ExN',
+                        ifelse(grepl('Progenitors', meta$active.ident), 'Ctx Progenitors', 'Ctx Other'))))				
+rownames(meta) <- paste(rownames(meta), '_C', sep = '')
+
+meta_Tha <- snTha@meta.data
+meta_Tha$active.ident <- snTha@active.ident
+meta_Tha <- meta_Tha[ ,c(9,26,43)]
+meta_Tha <- meta_Tha %>%
+  mutate(group = ifelse(grepl('ExN', meta_Tha$active.ident), 'cTh',
+                        ifelse(meta_Tha$active.ident == 'PT/ZLI/rTh', 'PT/ZLI/rTh', 'Th Other')))
+rownames(meta_Tha) <- paste(rownames(meta_Tha), '_T', sep = '')
+meta <- rbind(meta, meta_Tha)
+rm(meta_Tha)
+
+meta <- meta %>%
+  mutate(active.ident.new = case_when(
+    active.ident == 'Cycling Progenitors' & Organoid_protocol == 'cortex' ~ 'CO Cycling Progenitors',
+    active.ident == 'Cycling Progenitors' & Organoid_protocol == 'thalamus'~ 'ThO Cycling Progenitors',
+    active.ident == 'Glia' & Organoid_protocol == 'cortex'~ 'CO Glia',
+    active.ident == 'Glia' & Organoid_protocol == 'thalamus'~ 'ThO Glia',
+    TRUE ~ active.ident))
+
+meta$active.ident.new <- factor(meta$active.ident.new, levels = c("CO Cycling Progenitors" , 
+                   "Intermediate Progenitors",
+                   "Migrating ExN" ,
+                   "Maturing ExN" ,
+                   "Subplate/DL ExN",
+                   "DL ExN1",
+                   "DL ExN2",
+                   "UL ExN",
+                   "Un.ExN1" ,
+                   "Un.ExN2",
+                   "CO Glia",
+                   "Choroid Plexus", 
+                   "ThO Cycling Progenitors" , 
+                   "Radial Glia",
+                   "ThO Glia" ,
+                   "PT/ZLI/rTh" ,
+                   "ExN1",
+                   "ExN2",
+                   "ExN3",
+                   "ExN4" 
+                   )
+)
+
+#normalized count data
+target_df_CBO <- GetAssayData(object = snCBO, slot = "data")
+colnames(target_df_CBO) <- paste(colnames(target_df_CBO), '_C', sep = '')
+target_df_Tha <- GetAssayData(object = snTha, slot = "data")
+colnames(target_df_Tha) <- paste(colnames(target_df_Tha), '_T', sep = '')
+target_df <- RowMergeSparseMatrices(target_df_CBO, target_df_Tha) #use function from Seurat Object to perform quickly
+rm(target_df_CBO, target_df_Tha)
+
+#create group vector
+group <- as.vector(meta$Organoid_protocol)
+names(group) <- meta$active.ident.new
+group <- group[unique(names(group))]
+
+#create NeuronChat object and run NeuronChat
+TCA_NCO <- createNeuronChat(target_df, DB = 'human', group.by = meta$active.ident.new)
+TCA_NCO <- run_NeuronChat(TCA_NCO,M=100)
+net_aggregated_TCA <- net_aggregation(TCA_NCO@net,method = 'weight', cut_off = 0.05)
+
+#focus on thalamocortical interactions
+net_aggregated_TCA2 <- net_aggregation(TCA_NCO@net,method = 'weight_threshold', cut_off = 0.8)
+net_aggregated_TCA2 <- ifelse(net_aggregated_TCA2 < 0.6, 0, net_aggregated_TCA2)
+
+pdf('net_cTh_PT.pdf', height = 4, width = 4)
+netVisual_circle_neuron(net_aggregated_TCA2, 
+                        sources.use= unique(subset(meta, group %in% c('cTh', 'PT/ZLI/rTh'))$active.ident.new), 
+                        group=group, 
+                        vertex.label.cex = 0.5, 
+                        arrow.size = 1,
+                        vertex.size.max = 8,
+                        edge.width.max = 5)
+dev.off()
+
+pdf(file = 'heatmap_TC.pdf', height = 3.5, width = 8)
+heatmap_aggregated2(TCA_NCO, method = 'weight', group = group,
+                    sender.names= c('ExN1', 'ExN2', 'ExN3', 'ExN4', 'PT/ZLI/rTh'))
+dev.off()
+
+#focus on corticothalamic interactions
+net_aggregated_TCA3 <- net_aggregation(TCA_NCO@net,method = 'weight_threshold', cut_off = 0.8)
+net_aggregated_TCA3 <- ifelse(net_aggregated_TCA3 < 0.5, 0, net_aggregated_TCA3)
+
+pdf('net_Ctx_ExN.pdf', height = 4, width = 4)
+netVisual_circle_neuron(net_aggregated_TCA3, 
+                        sources.use= unique(subset(meta, group == 'Ctx ExN')$active.ident.new), 
+                        group=group, 
+                        vertex.label.cex = 0.5, 
+                        arrow.size = 1,
+                        vertex.size.max = 8,
+                        edge.width.max = 5)
+dev.off()
+
+pdf(file = 'heatmap_CT.pdf', height = 3.5, width = 8)
+heatmap_aggregated3(TCA_NCO, method = 'weight', group = group,
+                    sender.names= c('UL ExN', 'DL ExN2','DL ExN1', 'Subplate/DL ExN','Maturing ExN', 'Migrating ExN'))
+dev.off()
+
+#create heatmap focusing on glutamatergic,etc., interactions using custom function heatmap_aggregated_subset
+#use for subsetted x@net objects
+
+glu_TC <- TCA_NCO@net[grepl('Glu_', names(TCA_NCO@net))]
+pdf(file = 'heatmap_glu.pdf', height = 6, width = 8)
+heatmap_aggregated_subset(glu_TC, method = 'weight', group = group,
+                          sender.names = c('ExN1', 'ExN2', 'ExN3', 'ExN4', 'PT/ZLI/rTh',  'UL ExN', 'DL ExN2','DL ExN1', 'Subplate/DL ExN','Maturing ExN', 'Migrating ExN'))
+dev.off()
+
+
+NRXN_TC <- TCA_NCO@net[grepl('NRXN', names(TCA_NCO@net))]
+pdf(file = 'heatmap_nrxn.pdf', height = 6, width = 8)
+heatmap_aggregated_subset(NRXN_TC, method = 'weight', group = group,
+                          sender.names = c('ExN1', 'ExN2', 'ExN3', 'ExN4', 'PT/ZLI/rTh',  'UL ExN', 'DL ExN2','DL ExN1', 'Subplate/DL ExN','Maturing ExN', 'Migrating ExN'))
+dev.off()
