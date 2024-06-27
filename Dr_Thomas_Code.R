@@ -260,7 +260,7 @@ snCBO <- AddMetaData(
   col.name = "pseudotime"
 )
 
-#select cell trajectory of interest for Figure 1
+#select cell trajectory of interest for Figure 2
 main.trajectory <- subset(snCBO, idents = c("Cycling Progenitors" , 
                                               "Intermediate Progenitors",
                                               "Migrating ExN" ,
